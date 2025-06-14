@@ -1,0 +1,9 @@
+# .gitignore
+# Exclui o ambiente virtual
+venv/
+
+# Exclui o arquivo de variáveis de ambiente
+.env
+
+# Exclui a pasta de credenciais que contém a chave JSON da conta de serviço
+credentials/
