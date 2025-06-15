@@ -1,4 +1,4 @@
-// frontend/lib/api.ts
+// Demonst-Valores V2/frontend/lib/api.ts
 import axios from 'axios';
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_BASE_URL || 'http://localhost:8000';
@@ -50,10 +50,20 @@ export const fetchSheetTabs = async (): Promise<string[]> => {
     return response.data.tabs;
 };
 
-// Requisição para obter os dados da planilha de uma ABA ESPECÍFICA
-export const fetchSheetsData = async (sheetName: string): Promise<any[]> => {
+/**
+ * Requisição para obter os dados da planilha de uma ABA ESPECÍFICA.
+ * Adicionado um parâmetro para forçar a atualização dos dados, ignorando o cache do backend.
+ * @param sheetName O nome da aba da planilha a ser buscada.
+ * @param forceRefresh Se true, o backend será instruído a ignorar o cache e buscar dados novos do Google Sheets.
+ */
+export const fetchSheetsData = async (sheetName: string, forceRefresh: boolean = false): Promise<any[]> => {
+  const params: { sheet_name: string; force_refresh?: boolean } = { sheet_name: sheetName };
+  if (forceRefresh) {
+    params.force_refresh = true; // Adiciona o parâmetro de força de atualização
+  }
+
   const response = await api.get<any[]>('/api/sheets/data', {
-    params: { sheet_name: sheetName } // Envia o nome da aba como parâmetro de query
+    params: params // Envia o nome da aba e o force_refresh como parâmetros de query
   });
   // Se o backend retornar { message: "Nenhum dado..." }, converte para array vazio.
   // Isso facilita o tratamento do estado de dados no frontend.

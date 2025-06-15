@@ -1,4 +1,4 @@
-// frontend/app/dashboard/page.tsx
+// Demonst-Valores V2/frontend/app/dashboard/page.tsx
 'use client';
 
 import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
@@ -38,12 +38,18 @@ export default function DashboardPage() {
   const router = useRouter();
 
   // --- CALLBACKS (Funções Memorizadas) ---
-  const loadSheetsData = useCallback(async (tabName: string) => {
+  /**
+   * Carrega os dados da planilha para a aba selecionada.
+   * @param tabName O nome da aba.
+   * @param forceRefresh Opcional. Se true, força o backend a buscar dados novos do Google Sheets.
+   */
+  const loadSheetsData = useCallback(async (tabName: string, forceRefresh: boolean = false) => {
     if (!tabName) return;
     setCurrentTabLoading(true);
     setError('');
     try {
-      const sheetsData: SheetDataItem[] = await fetchSheetsData(tabName);
+      // Chama a função da API passando o novo parâmetro forceRefresh
+      const sheetsData: SheetDataItem[] = await fetchSheetsData(tabName, forceRefresh);
       setData(sheetsData);
 
       if (sheetsData && sheetsData.length > 0) {
@@ -223,7 +229,21 @@ export default function DashboardPage() {
     }
   }, [clearSelection]);
 
-  // --- MEMOS (Memorized Values) ---
+  /**
+   * Função para lidar com o clique no botão de "Atualizar Dados".
+   * Força o carregamento dos dados da aba atual, ignorando o cache do backend.
+   */
+  const handleRefreshData = useCallback(async () => {
+    if (selectedTab) {
+      // Opcional: Limpa os dados existentes para dar um feedback visual imediato de que algo está acontecendo
+      setData(null);
+      // Força o carregamento dos dados da aba atual com forceRefresh = true
+      await loadSheetsData(selectedTab, true);
+    }
+  }, [selectedTab, loadSheetsData]);
+
+
+  // --- MEMOS (Valores Memorizados) ---
   const filteredData = useMemo(() => {
     if (!data) return null;
     if (selectedYears.length === 0) return [];
@@ -253,6 +273,7 @@ export default function DashboardPage() {
         if (tabs.length > 0) {
           const initialTab = tabs[0];
           setSelectedTab(initialTab);
+          // Não chame loadSheetsData aqui diretamente; deixe o useEffect para 'selectedTab' fazer isso
         } else {
           setData([]);
           setAvailableYears([]);
@@ -274,10 +295,10 @@ export default function DashboardPage() {
     initializeDashboard();
   }, [router]);
 
-  // Effect to reload data when the selected tab changes
+  // Efeito para recarregar dados quando a aba selecionada muda
   useEffect(() => {
     if (selectedTab && !initialLoading) {
-      loadSheetsData(selectedTab);
+      loadSheetsData(selectedTab); // Carregamento inicial para a aba selecionada (sem força de atualização)
     }
   }, [selectedTab, initialLoading, loadSheetsData]);
 
@@ -305,7 +326,7 @@ export default function DashboardPage() {
     };
   }, [clearSelection]);
 
-  // --- CONDITIONAL RENDERING ---
+  // --- RENDERIZAÇÃO CONDICIONAL ---
   const showNoDataMessage = (!filteredData || filteredData.length === 0);
 
   if (initialLoading) {
@@ -330,12 +351,22 @@ export default function DashboardPage() {
     <div className="min-h-screen bg-gray-100 p-8 text-gray-900">
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-3xl font-bold text-gray-900">Dashboard Financeiro</h1>
-        <button
-          onClick={handleLogout}
-          className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded"
-        >
-          Sair
-        </button>
+        <div className="flex items-center space-x-4"> {/* Container para os botões */}
+          {/* NOVO: Botão para Atualizar Dados */}
+          <button
+            onClick={handleRefreshData}
+            className="bg-blue-500 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded"
+            disabled={currentTabLoading || !selectedTab} // Desabilita enquanto carrega ou se nenhuma aba estiver selecionada
+          >
+            Atualizar Dados
+          </button>
+          <button
+            onClick={handleLogout}
+            className="bg-red-500 hover:bg-red-700 text-white font-bold py-2 px-4 rounded"
+          >
+            Sair
+          </button>
+        </div>
       </div>
 
       <div className="flex items-start justify-between mb-4">

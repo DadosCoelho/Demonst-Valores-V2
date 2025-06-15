@@ -1,11 +1,10 @@
-# app/main.py
+# Demonst-Valores V2/meu_projeto_financeiro/app/main.py
 import os
 import json
-import re # <-- NOVA IMPORTAÇÃO: Módulo para Expressões Regulares
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Annotated
 from fastapi import FastAPI, HTTPException, status, Depends, Response, Request, Query
-
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from dotenv import load_dotenv
 import pandas as pd
@@ -272,19 +271,28 @@ async def get_sheet_tabs(current_user: Annotated[User, Depends(get_current_activ
 async def read_sheets_data(
     sheet_name: Annotated[str, Query(description="Nome da aba/sheet a ser lida na planilha.")],
     current_user: Annotated[User, Depends(get_current_active_user)],
-    db: Annotated[SessionLocal, Depends(get_db)]
+    db: Annotated[SessionLocal, Depends(get_db)],
+    force_refresh: Annotated[bool, Query(description="Force a refresh of data from Google Sheets, bypassing cache.")] = False 
 ):
     # 1. Tenta buscar do cache
     cached_data = db.query(SheetCache).filter(SheetCache.sheet_name == sheet_name).first()
     
     now_utc = datetime.now(timezone.utc)
     
-    if cached_data and (now_utc - cached_data.cached_at) < timedelta(minutes=CACHE_TTL_MINUTES):
+    # Condição para usar o cache: deve existir, não forçar refresh, e não estar expirado
+    if cached_data and not force_refresh and (now_utc - cached_data.cached_at) < timedelta(minutes=CACHE_TTL_MINUTES):
         print(f"[CACHE HIT] Retornando dados para '{sheet_name}' do cache.")
         return json.loads(cached_data.data_json)
     
-    # 2. Se não houver cache ou estiver expirado, busca da API do Google Sheets
-    print(f"[CACHE MISS/EXPIRED] Buscando dados para '{sheet_name}' da Google Sheets API.")
+    # Se force_refresh for True e houver dados cacheados, remove o cache antigo para garantir o refresh
+    if force_refresh and cached_data:
+        print(f"[CACHE PURGE] Forçando atualização, removendo cache existente para '{sheet_name}'.")
+        db.delete(cached_data)
+        db.commit()
+        cached_data = None # Reseta cached_data para que a lógica de busca/criação seja nova
+
+    # 2. Se não houver cache, ou estiver expirado, ou force_refresh for True, busca da API do Google Sheets
+    print(f"[CACHE MISS/EXPIRED/FORCED] Buscando dados para '{sheet_name}' da Google Sheets API.")
     service = get_sheets_service()
     try:
         full_range = f"{sheet_name}!{DEFAULT_DATA_RANGE_IN_SHEET}"
@@ -297,7 +305,7 @@ async def read_sheets_data(
         values = result.get('values', [])
 
         if not values or len(values) < 2: # Precisa de cabeçalhos e pelo menos uma linha de dados
-            if cached_data:
+            if cached_data: # Se por algum motivo ainda houver cache, limpa para evitar dados desatualizados
                 db.delete(cached_data)
                 db.commit()
             return {"message": "Nenhum dado encontrado na aba ou intervalo especificado."}
@@ -354,36 +362,64 @@ async def read_sheets_data(
 
             transformed_data = []
 
+            # --- ATUALIZADO: Função auxiliar para limpar e converter para float, incluindo parênteses e sinais ---
+            def safe_float_convert(val):
+                if pd.notnull(val):
+                    s_val = str(val).strip()
+                    if s_val:
+                        # Determina se o número é negativo e remove o sinal/parênteses
+                        is_negative = False
+                        if s_val.startswith('(') and s_val.endswith(')'):
+                            s_val = s_val[1:-1].strip() # Remove parênteses e espaços
+                            is_negative = True
+                        elif s_val.startswith('-'):
+                            is_negative = True
+                            s_val = s_val[1:].strip() # Remove o sinal de menos e espaços
+                        
+                        # Remove 'R$', espaços em branco, pontos de milhar e troca vírgula decimal por ponto
+                        s_val_cleaned = s_val.replace('R$', '').replace(' ', '').replace('.', '').replace(',', '.').strip()
+                        
+                        try:
+                            numeric_val = float(s_val_cleaned)
+                            return -numeric_val if is_negative else numeric_val
+                        except ValueError:
+                            print(f"DEBUG: Falha na conversão de '{s_val}' (original: '{val}') para float. Retornando 0.0.")
+                            return 0.0
+                return 0.0
+
             for year_int, original_col_name in years_info: # Itera usando o ano inteiro e o nome original da coluna
-                registro = {'ano': year_int} # O frontend espera 'ano' como número inteiro
+                registro = {'ano': year_int}
                 
                 percentuais = {}
                 
                 for campo_indicador, valor in df_raw[original_col_name].items():
-                    registro[campo_indicador] = valor
+                    # Converte o valor do indicador atual para numérico, usando a nova função de limpeza
+                    valor_numeric = safe_float_convert(valor)
+                    registro[campo_indicador] = valor_numeric # Armazena o valor já numérico no registro principal
                     
                     if bases is not None:
-                        base_ref = bases.get(campo_indicador)
+                        base_ref = bases.get(campo_indicador) # Pega a referência da coluna 'BasePercentual'
+                        
                         if pd.notnull(base_ref) and str(base_ref).strip() != '':
                             base_ref_str = str(base_ref).strip()
-                            if base_ref_str.lower() == 'base':
+                            if base_ref_str.lower() == 'base': # Se a própria linha é a base, não calcula percentual
                                 continue
-
-                            if base_ref_str in df_raw.index:
-                                valor_base = df_raw.at[base_ref_str, original_col_name]
+  
+                            if base_ref_str in df_raw.index: # Verifica se a referência da base existe como um indicador (índice da linha)
+                                valor_base = df_raw.at[base_ref_str, original_col_name] # Pega o valor da base para o ano atual
                                 
-                                try:
-                                    valor_numeric = float(valor) if pd.notnull(valor) else 0.0
-                                    valor_base_numeric = float(valor_base) if pd.notnull(valor_base) else 0.0
-                                except (ValueError, TypeError):
-                                    valor_numeric = 0.0
-                                    valor_base_numeric = 0.0
+                                # Converte o valor da base para numérico, usando a nova função de limpeza
+                                valor_base_numeric = safe_float_convert(valor_base)
 
-                                if valor_base_numeric != 0:
+                                if valor_base_numeric != 0: # Evita divisão por zero
                                     percentuais[campo_indicador] = round(100 * valor_numeric / valor_base_numeric, 2)
                                 else:
                                     percentuais[campo_indicador] = 0.0
-                                    
+                            else:
+                                pass # Base de referência não encontrada como indicador, não calcula percentual
+                        else:
+                            pass # Base de referência nula/vazia, não calcula percentual
+                                      
                 registro['percentuais'] = percentuais
                 transformed_data.append(registro)
             
@@ -392,10 +428,11 @@ async def read_sheets_data(
         # 3. Atualiza o cache no banco de dados
         current_data_json = json.dumps(data_to_cache, ensure_ascii=False)
 
-        if cached_data:
+        if cached_data: # Se já existia um cache (mas foi ignorado/removido acima), apenas atualiza
             cached_data.data_json = current_data_json
             cached_data.cached_at = now_utc
-        else:
+            db.add(cached_data) # Re-adiciona ao gerenciador de sessão se foi deletado
+        else: # Se não existia cache, cria um novo
             new_cache_entry = SheetCache(
                 sheet_name=sheet_name,
                 data_json=current_data_json,
@@ -404,7 +441,6 @@ async def read_sheets_data(
             db.add(new_cache_entry)
         
         db.commit()
-        db.refresh(cached_data or new_cache_entry)
         
         return data_to_cache
 
